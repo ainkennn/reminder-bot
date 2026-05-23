@@ -54,14 +54,14 @@ thread_filter = filters.UpdateFilter(_in_target_thread)
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
-        "👋 *Team Reminder Bot*\n\n"
-        "Commands:\n"
-        "• /newtask – create a new task with a reminder\n"
-        "• /listmembers – show the team roster\n"
-        "• /cancel – cancel the current task flow\n\n"
-        "_Admin only:_\n"
-        "• /addmember `<id> <name> [role]` – add / update a team member\n"
-        "• /delmember `<id>` – remove a team member",
+        "👋 *Бот для задач и напоминаний*\n\n"
+        "Команды:\n"
+        "• /newtask – создать новую задачу\n"
+        "• /listmembers – список участников команды\n"
+        "• /cancel – отменить создание задачи\n\n"
+        "_Только для админов:_\n"
+        "• /addmember `<id> <имя> [роль]` – добавить / обновить участника\n"
+        "• /delmember `<id>` – удалить участника",
         parse_mode="Markdown",
         message_thread_id=THREAD_ID,
     )
