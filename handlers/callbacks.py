@@ -11,7 +11,7 @@ import pytz
 from telegram import Update
 from telegram.ext import ContextTypes, CallbackQueryHandler
 
-from config import TIMEZONE
+from config import TIMEZONE, THREAD_ID
 import db
 
 logger = logging.getLogger(__name__)
@@ -63,6 +63,7 @@ async def handle_read(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id=task["chat_id"],
         text=status_text,
         parse_mode="Markdown",
+        message_thread_id=THREAD_ID,
     )
     logger.info("Task %s marked as read", task_id)
 
