@@ -61,7 +61,7 @@ def _send_reminder(task_id: int, bot_token: str) -> None:
     )
 
     keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("✅ Read", callback_data=f"read:{task_id}")]]
+        [[InlineKeyboardButton("✅ Прочитано", callback_data=f"read:{task_id}")]]
     )
 
     async def _send():
