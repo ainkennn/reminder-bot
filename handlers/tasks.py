@@ -1,14 +1,13 @@
 """
-handlers/tasks.py – Guided task-creation conversation (ru, 4 steps + edit flow).
+handlers/tasks.py – Создание задачи (5 шагов + редактирование).
 
-States
-------
-ASK_TITLE       → user types task title
-ASK_DESC        → user types description or skips
-ASK_DEADLINE    → user types deadline
-ASK_RESPONSIBLE → user picks team member
-CONFIRM         → summary + confirm / edit
-EDIT_MENU       → which field to edit?
+Шаги:
+  1. Название
+  2. Описание (или пропустить)
+  3. Дедлайн
+  4. Ответственный (команда или участник)
+  5. Статус
+  → Резюме → Подтвердить / Изменить
 """
 
 import logging
@@ -17,12 +16,8 @@ from datetime import datetime
 import pytz
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ContextTypes,
-    ConversationHandler,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    filters,
+    ContextTypes, ConversationHandler,
+    CommandHandler, MessageHandler, CallbackQueryHandler, filters,
 )
 
 from config import TIMEZONE, THREAD_ID
@@ -32,28 +27,41 @@ import scheduler as sched
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# States
+# Состояния диалога
 # ---------------------------------------------------------------------------
 ASK_TITLE       = 0
 ASK_DESC        = 1
 ASK_DEADLINE    = 2
 ASK_RESPONSIBLE = 3
-CONFIRM         = 4
-EDIT_MENU       = 5
+ASK_STATUS      = 4
+CONFIRM         = 5
+EDIT_MENU       = 6
 
 # ---------------------------------------------------------------------------
-# user_data keys
+# Ключи user_data
 # ---------------------------------------------------------------------------
-_TITLE     = "task_title"
-_DESC      = "task_desc"
-_DEADLINE  = "task_deadline"
-_RESP_ID   = "task_resp_id"
-_RESP_NAME = "task_resp_name"
-_MSG_IDS   = "task_msg_ids"
+_TITLE      = "task_title"
+_DESC       = "task_desc"
+_DEADLINE   = "task_deadline"
+_RESP_ID    = "task_resp_id"
+_RESP_NAME  = "task_resp_name"
+_STATUS     = "task_status"
+_MSG_IDS    = "task_msg_ids"
+_AFTER_EDIT = "_after_edit"
+
+# ---------------------------------------------------------------------------
+# Статусы
+# ---------------------------------------------------------------------------
+STATUSES = [
+    ("🔵 В работе",      "в работе"),
+    ("🟡 Согласование",  "согласование"),
+    ("🔴 Риск",          "риск"),
+    ("🟢 Согласовано",   "согласовано"),
+]
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Вспомогательные функции
 # ---------------------------------------------------------------------------
 
 def _track(ctx, msg_id):
@@ -70,60 +78,51 @@ async def _delete_tracked(ctx, chat_id):
 
 
 def _clear_state(ctx):
-    for key in (_TITLE, _DESC, _DEADLINE, _RESP_ID, _RESP_NAME, _MSG_IDS):
+    for key in (_TITLE, _DESC, _DEADLINE, _RESP_ID, _RESP_NAME, _STATUS, _MSG_IDS, _AFTER_EDIT):
         ctx.user_data.pop(key, None)
 
 
-def _back_kb():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="back")]])
+def _back_kb(callback="back"):
+    return InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data=callback)]])
 
 
 def _summary_text(ctx):
-    tz     = pytz.timezone(TIMEZONE)
-    dt     = datetime.fromisoformat(ctx.user_data[_DEADLINE]).astimezone(tz)
-    dl_str = dt.strftime("%Y-%m-%d %H:%M")
-    desc   = ctx.user_data.get(_DESC) or "—"
+    from scheduler import fmt_dt
+    tz      = pytz.timezone(TIMEZONE)
+    dl_str  = fmt_dt(ctx.user_data[_DEADLINE])
+    desc    = ctx.user_data.get(_DESC) or "—"
+    status  = ctx.user_data.get(_STATUS) or "—"
+    resp    = ctx.user_data[_RESP_NAME]
     return (
         f"📋 *Резюме*\n\n"
         f"*Название:* {ctx.user_data[_TITLE]}\n"
         f"*Описание:* {desc}\n"
         f"*Дедлайн:* {dl_str}\n"
-        f"*Ответственный:* {ctx.user_data[_RESP_NAME]}"
+        f"*Ответственный:* {resp}\n"
+        f"*Статус:* {status}"
     )
 
 
 def _summary_kb():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Утверждаем!", callback_data="task_confirm")],
-        [InlineKeyboardButton("✏️ Изменить",   callback_data="task_edit")],
+        [InlineKeyboardButton("✏️ Изменить",    callback_data="task_edit")],
     ])
 
 
-async def _show_summary(update_or_query, ctx, chat_id):
-    """Send (or re-send) the summary message and track it."""
-    text = _summary_text(ctx)
-    if hasattr(update_or_query, 'message') and update_or_query.message:
-        msg = await ctx.bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            parse_mode="Markdown",
-            reply_markup=_summary_kb(),
-            message_thread_id=THREAD_ID,
-        )
-    else:
-        msg = await ctx.bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            parse_mode="Markdown",
-            reply_markup=_summary_kb(),
-            message_thread_id=THREAD_ID,
-        )
+async def _show_summary(ctx, chat_id):
+    msg = await ctx.bot.send_message(
+        chat_id=chat_id,
+        text=_summary_text(ctx),
+        parse_mode="Markdown",
+        reply_markup=_summary_kb(),
+        message_thread_id=THREAD_ID,
+    )
     _track(ctx, msg.message_id)
-    return msg
 
 
 # ---------------------------------------------------------------------------
-# Step 0 — /newtask
+# Шаг 0 — /newtask
 # ---------------------------------------------------------------------------
 
 async def cmd_newtask(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
@@ -135,7 +134,7 @@ async def cmd_newtask(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
     _clear_state(ctx)
     msg = await update.message.reply_text(
-        "📝 *Новая задача*\n\nШаг 1/4 — Название задачи?",
+        "📝 *Новая задача*\n\nШаг 1/5 — Название задачи?",
         parse_mode="Markdown",
         message_thread_id=THREAD_ID,
     )
@@ -145,19 +144,24 @@ async def cmd_newtask(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Step 1 — receive title
+# Шаг 1 — Название
 # ---------------------------------------------------------------------------
 
 async def recv_title(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     ctx.user_data[_TITLE] = update.message.text.strip()
     _track(ctx, update.message.message_id)
 
+    if ctx.user_data.get(_AFTER_EDIT) == "summary":
+        ctx.user_data.pop(_AFTER_EDIT)
+        await _show_summary(ctx, update.effective_chat.id)
+        return CONFIRM
+
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("⬜ Оставить пустым", callback_data="desc_skip")],
         [InlineKeyboardButton("◀️ Назад",           callback_data="back_to_title")],
     ])
     msg = await update.message.reply_text(
-        "📝 *Новая задача*\n\nШаг 2/4 — Описание задачи?",
+        "📝 *Новая задача*\n\nШаг 2/5 — Описание задачи?",
         parse_mode="Markdown",
         reply_markup=keyboard,
         message_thread_id=THREAD_ID,
@@ -167,27 +171,38 @@ async def recv_title(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Step 2 — receive description (text or skip)
+# Шаг 2 — Описание
 # ---------------------------------------------------------------------------
 
 async def recv_desc(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     ctx.user_data[_DESC] = update.message.text.strip()
     _track(ctx, update.message.message_id)
+
+    if ctx.user_data.get(_AFTER_EDIT) == "summary":
+        ctx.user_data.pop(_AFTER_EDIT)
+        await _show_summary(ctx, update.effective_chat.id)
+        return CONFIRM
+
     return await _ask_deadline(update, ctx)
 
 
 async def cb_desc_skip(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     await update.callback_query.answer()
     ctx.user_data[_DESC] = ""
+
+    if ctx.user_data.get(_AFTER_EDIT) == "summary":
+        ctx.user_data.pop(_AFTER_EDIT)
+        await _show_summary(ctx, update.effective_chat.id)
+        return CONFIRM
+
     return await _ask_deadline(update, ctx)
 
 
 async def cb_back_to_title(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     await update.callback_query.answer()
-    chat_id = update.effective_chat.id
     msg = await ctx.bot.send_message(
-        chat_id=chat_id,
-        text="📝 *Новая задача*\n\nШаг 1/4 — Название задачи?",
+        chat_id=update.effective_chat.id,
+        text="📝 *Новая задача*\n\nШаг 1/5 — Название задачи?",
         parse_mode="Markdown",
         message_thread_id=THREAD_ID,
     )
@@ -195,26 +210,25 @@ async def cb_back_to_title(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
     return ASK_TITLE
 
 
+# ---------------------------------------------------------------------------
+# Шаг 3 — Дедлайн
+# ---------------------------------------------------------------------------
+
 async def _ask_deadline(update, ctx) -> int:
-    chat_id = update.effective_chat.id
     msg = await ctx.bot.send_message(
-        chat_id=chat_id,
+        chat_id=update.effective_chat.id,
         text=(
-            f"📅 *Новая задача*\n\nШаг 3/4 — Какой дедлайн?\n\n"
+            f"📅 *Новая задача*\n\nШаг 3/5 — Какой дедлайн?\n\n"
             f"Введите дату и время в формате:\n`ГГГГ-ММ-ДД ЧЧ:ММ`\n\n"
             f"_(Часовой пояс: {TIMEZONE})_"
         ),
         parse_mode="Markdown",
-        reply_markup=_back_kb(),
+        reply_markup=_back_kb("back_to_desc"),
         message_thread_id=THREAD_ID,
     )
     _track(ctx, msg.message_id)
     return ASK_DEADLINE
 
-
-# ---------------------------------------------------------------------------
-# Step 3 — receive deadline
-# ---------------------------------------------------------------------------
 
 async def recv_deadline(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     raw = update.message.text.strip()
@@ -226,9 +240,9 @@ async def recv_deadline(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         dt = tz.localize(dt)
     except ValueError:
         msg = await update.message.reply_text(
-            "❌ Неверный формат. Используйте `ГГГГ-ММ-ДД ЧЧ:ММ` (например `2025-12-31 09:00`).",
+            "❌ Неверный формат. Используйте `ГГГГ-ММ-ДД ЧЧ:ММ`.",
             parse_mode="Markdown",
-            reply_markup=_back_kb(),
+            reply_markup=_back_kb("back_to_desc"),
             message_thread_id=THREAD_ID,
         )
         _track(ctx, msg.message_id)
@@ -237,22 +251,44 @@ async def recv_deadline(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     if dt <= datetime.now(tz):
         msg = await update.message.reply_text(
             "❌ Дедлайн должен быть в будущем. Попробуйте ещё раз.",
-            reply_markup=_back_kb(),
+            reply_markup=_back_kb("back_to_desc"),
             message_thread_id=THREAD_ID,
         )
         _track(ctx, msg.message_id)
         return ASK_DEADLINE
 
     ctx.user_data[_DEADLINE] = dt.isoformat()
+
+    if ctx.user_data.get(_AFTER_EDIT) == "summary":
+        ctx.user_data.pop(_AFTER_EDIT)
+        await _show_summary(ctx, update.effective_chat.id)
+        return CONFIRM
+
     return await _ask_responsible(update, ctx)
 
 
+async def cb_back_to_desc(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.callback_query.answer()
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬜ Оставить пустым", callback_data="desc_skip")],
+        [InlineKeyboardButton("◀️ Назад",           callback_data="back_to_title")],
+    ])
+    msg = await ctx.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="📝 *Новая задача*\n\nШаг 2/5 — Описание задачи?",
+        parse_mode="Markdown",
+        reply_markup=keyboard,
+        message_thread_id=THREAD_ID,
+    )
+    _track(ctx, msg.message_id)
+    return ASK_DESC
+
+
 # ---------------------------------------------------------------------------
-# Step 4 — pick responsible
+# Шаг 4 — Ответственный
 # ---------------------------------------------------------------------------
 
 async def _ask_responsible(update, ctx) -> int:
-    chat_id = update.effective_chat.id
     members = db.get_all_members()
     rows = [
         [InlineKeyboardButton(
@@ -261,21 +297,19 @@ async def _ask_responsible(update, ctx) -> int:
         )]
         for m in members
     ]
-    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_deadline")])
+    # Постоянная кнопка "Команда"
+    rows.append([InlineKeyboardButton("👥 Команда", callback_data="pick:0:Команда")])
+    rows.append([InlineKeyboardButton("◀️ Назад",   callback_data="back_to_deadline")])
+
     msg = await ctx.bot.send_message(
-        chat_id=chat_id,
-        text="👤 *Новая задача*\n\nШаг 4/4 — Ответственный:",
+        chat_id=update.effective_chat.id,
+        text="👤 *Новая задача*\n\nШаг 4/5 — Ответственный:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(rows),
         message_thread_id=THREAD_ID,
     )
     _track(ctx, msg.message_id)
     return ASK_RESPONSIBLE
-
-
-async def cb_back_to_deadline(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.callback_query.answer()
-    return await _ask_deadline(update, ctx)
 
 
 async def cb_pick_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
@@ -286,12 +320,77 @@ async def cb_pick_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     ctx.user_data[_RESP_NAME] = name
     _track(ctx, query.message.message_id)
 
-    await _show_summary(query, ctx, update.effective_chat.id)
-    return CONFIRM
+    if ctx.user_data.get(_AFTER_EDIT) == "summary":
+        ctx.user_data.pop(_AFTER_EDIT)
+        await _show_summary(ctx, update.effective_chat.id)
+        return CONFIRM
+
+    return await _ask_status(update, ctx)
+
+
+async def cb_back_to_deadline(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.callback_query.answer()
+    return await _ask_deadline(update, ctx)
 
 
 # ---------------------------------------------------------------------------
-# Confirm / Edit
+# Шаг 5 — Статус
+# ---------------------------------------------------------------------------
+
+async def _ask_status(update, ctx) -> int:
+    rows = [
+        [InlineKeyboardButton(label, callback_data=f"status:{value}")]
+        for label, value in STATUSES
+    ]
+    rows.append([InlineKeyboardButton("⬜ Оставить пустым", callback_data="status_skip")])
+    rows.append([InlineKeyboardButton("◀️ Назад",           callback_data="back_to_responsible")])
+
+    msg = await ctx.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="📝 *Новая задача*\n\nШаг 5/5 — Статус:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(rows),
+        message_thread_id=THREAD_ID,
+    )
+    _track(ctx, msg.message_id)
+    return ASK_STATUS
+
+
+async def cb_pick_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    value = query.data.split(":", 1)[1]
+    # Find the label for this value to store display text
+    label = next((l for l, v in STATUSES if v == value), value)
+    ctx.user_data[_STATUS] = label
+    _track(ctx, query.message.message_id)
+
+    if ctx.user_data.get(_AFTER_EDIT) == "summary":
+        ctx.user_data.pop(_AFTER_EDIT)
+
+    await _show_summary(ctx, update.effective_chat.id)
+    return CONFIRM
+
+
+async def cb_status_skip(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.callback_query.answer()
+    ctx.user_data[_STATUS] = ""
+    _track(ctx, update.callback_query.message.message_id)
+
+    if ctx.user_data.get(_AFTER_EDIT) == "summary":
+        ctx.user_data.pop(_AFTER_EDIT)
+
+    await _show_summary(ctx, update.effective_chat.id)
+    return CONFIRM
+
+
+async def cb_back_to_responsible(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.callback_query.answer()
+    return await _ask_responsible(update, ctx)
+
+
+# ---------------------------------------------------------------------------
+# Подтверждение
 # ---------------------------------------------------------------------------
 
 async def cb_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
@@ -299,27 +398,32 @@ async def cb_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     await query.answer()
     chat_id = update.effective_chat.id
 
+    title     = ctx.user_data[_TITLE]
     desc      = ctx.user_data.get(_DESC) or ""
     deadline  = ctx.user_data[_DEADLINE]
     resp_id   = ctx.user_data[_RESP_ID]
     resp_name = ctx.user_data[_RESP_NAME]
-    title     = ctx.user_data[_TITLE]
+    status    = ctx.user_data.get(_STATUS) or ""
 
-    task_id = db.create_task(chat_id, desc, deadline, resp_id, resp_name, title)
-
+    task_id = db.create_task(chat_id, desc, deadline, resp_id, resp_name, title, status)
     await _delete_tracked(ctx, chat_id)
 
-    tz     = pytz.timezone(TIMEZONE)
-    dt     = datetime.fromisoformat(deadline).astimezone(tz)
-    dl_str = dt.strftime("%Y-%m-%d %H:%M")
-    mention = f"[{resp_name}](tg://user?id={resp_id})"
+    from scheduler import fmt_dt
+    dl_str = fmt_dt(deadline)
+
+    # Mention only if real user (not Команда)
+    if resp_id == 0:
+        resp_display = "👥 Команда"
+    else:
+        resp_display = f"[{resp_name}](tg://user?id={resp_id})"
 
     final_text = (
         f"✅ *Задача поставлена (ID: {task_id})*\n\n"
         f"*Название:* {title}\n"
         f"*Описание:* {desc or '—'}\n"
         f"*Дедлайн:* {dl_str}\n"
-        f"*Ответственный:* {mention}"
+        f"*Ответственный:* {resp_display}\n"
+        f"*Статус:* {status or '—'}"
     )
     sent = await ctx.bot.send_message(
         chat_id=chat_id,
@@ -328,25 +432,31 @@ async def cb_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         message_thread_id=THREAD_ID,
     )
     db.set_summary_msg(task_id, sent.message_id)
+
+    tz = pytz.timezone(TIMEZONE)
+    dt = datetime.fromisoformat(deadline).astimezone(tz)
     sched.schedule_reminder(task_id, dt, ctx.bot.token)
 
     _clear_state(ctx)
     return ConversationHandler.END
 
 
+# ---------------------------------------------------------------------------
+# Меню редактирования
+# ---------------------------------------------------------------------------
+
 async def cb_edit_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-    chat_id = update.effective_chat.id
-
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📝 Название",      callback_data="edit_title")],
         [InlineKeyboardButton("📄 Описание",      callback_data="edit_desc")],
         [InlineKeyboardButton("📅 Дедлайн",       callback_data="edit_deadline")],
         [InlineKeyboardButton("👤 Ответственный", callback_data="edit_responsible")],
+        [InlineKeyboardButton("🔵 Статус",        callback_data="edit_status")],
     ])
     msg = await ctx.bot.send_message(
-        chat_id=chat_id,
+        chat_id=update.effective_chat.id,
         text="✏️ *Что изменить?*",
         parse_mode="Markdown",
         reply_markup=keyboard,
@@ -356,155 +466,67 @@ async def cb_edit_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     return EDIT_MENU
 
 
-# Edit jumps — send user back to the right step, then return to summary after
-
 async def cb_edit_title(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     await update.callback_query.answer()
-    chat_id = update.effective_chat.id
+    ctx.user_data[_AFTER_EDIT] = "summary"
     msg = await ctx.bot.send_message(
-        chat_id=chat_id,
+        chat_id=update.effective_chat.id,
         text="📝 Введите новое *название задачи*:",
         parse_mode="Markdown",
         message_thread_id=THREAD_ID,
     )
     _track(ctx, msg.message_id)
-    ctx.user_data["_after_edit"] = "summary"
     return ASK_TITLE
 
 
 async def cb_edit_desc(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     await update.callback_query.answer()
-    chat_id = update.effective_chat.id
+    ctx.user_data[_AFTER_EDIT] = "summary"
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("⬜ Оставить пустым", callback_data="desc_skip")]
     ])
     msg = await ctx.bot.send_message(
-        chat_id=chat_id,
+        chat_id=update.effective_chat.id,
         text="📄 Введите новое *описание задачи*:",
         parse_mode="Markdown",
         reply_markup=keyboard,
         message_thread_id=THREAD_ID,
     )
     _track(ctx, msg.message_id)
-    ctx.user_data["_after_edit"] = "summary"
     return ASK_DESC
 
 
 async def cb_edit_deadline(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     await update.callback_query.answer()
-    chat_id = update.effective_chat.id
+    ctx.user_data[_AFTER_EDIT] = "summary"
     msg = await ctx.bot.send_message(
-        chat_id=chat_id,
-        text=(
-            f"📅 Введите новый *дедлайн*:\n\n"
-            f"`ГГГГ-ММ-ДД ЧЧ:ММ`\n_(Часовой пояс: {TIMEZONE})_"
-        ),
+        chat_id=update.effective_chat.id,
+        text=f"📅 Введите новый *дедлайн*:\n\n`ГГГГ-ММ-ДД ЧЧ:ММ`\n_(Часовой пояс: {TIMEZONE})_",
         parse_mode="Markdown",
         message_thread_id=THREAD_ID,
     )
     _track(ctx, msg.message_id)
-    ctx.user_data["_after_edit"] = "summary"
     return ASK_DEADLINE
 
 
 async def cb_edit_responsible(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     await update.callback_query.answer()
-    ctx.user_data["_after_edit"] = "summary"
+    ctx.user_data[_AFTER_EDIT] = "summary"
     return await _ask_responsible(update, ctx)
 
 
-# Override recv_title / recv_desc / recv_deadline to return to summary if editing
-
-async def recv_title_smart(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    ctx.user_data[_TITLE] = update.message.text.strip()
-    _track(ctx, update.message.message_id)
-
-    if ctx.user_data.get("_after_edit") == "summary":
-        ctx.user_data.pop("_after_edit", None)
-        await _show_summary(update, ctx, update.effective_chat.id)
-        return CONFIRM
-
-    # Normal flow → go to desc
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("⬜ Оставить пустым", callback_data="desc_skip")],
-        [InlineKeyboardButton("◀️ Назад",           callback_data="back_to_title")],
-    ])
-    msg = await update.message.reply_text(
-        "📝 *Новая задача*\n\nШаг 2/4 — Описание задачи?",
-        parse_mode="Markdown",
-        reply_markup=keyboard,
-        message_thread_id=THREAD_ID,
-    )
-    _track(ctx, msg.message_id)
-    return ASK_DESC
-
-
-async def recv_desc_smart(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    ctx.user_data[_DESC] = update.message.text.strip()
-    _track(ctx, update.message.message_id)
-
-    if ctx.user_data.get("_after_edit") == "summary":
-        ctx.user_data.pop("_after_edit", None)
-        await _show_summary(update, ctx, update.effective_chat.id)
-        return CONFIRM
-
-    return await _ask_deadline(update, ctx)
-
-
-async def cb_desc_skip_smart(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+async def cb_edit_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     await update.callback_query.answer()
-    ctx.user_data[_DESC] = ""
-
-    if ctx.user_data.get("_after_edit") == "summary":
-        ctx.user_data.pop("_after_edit", None)
-        await _show_summary(update, ctx, update.effective_chat.id)
-        return CONFIRM
-
-    return await _ask_deadline(update, ctx)
-
-
-async def recv_deadline_smart(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    raw = update.message.text.strip()
-    _track(ctx, update.message.message_id)
-    tz = pytz.timezone(TIMEZONE)
-
-    try:
-        dt = datetime.strptime(raw, "%Y-%m-%d %H:%M")
-        dt = tz.localize(dt)
-    except ValueError:
-        msg = await update.message.reply_text(
-            "❌ Неверный формат. Используйте `ГГГГ-ММ-ДД ЧЧ:ММ`.",
-            parse_mode="Markdown",
-            message_thread_id=THREAD_ID,
-        )
-        _track(ctx, msg.message_id)
-        return ASK_DEADLINE
-
-    if dt <= datetime.now(tz):
-        msg = await update.message.reply_text(
-            "❌ Дедлайн должен быть в будущем. Попробуйте ещё раз.",
-            message_thread_id=THREAD_ID,
-        )
-        _track(ctx, msg.message_id)
-        return ASK_DEADLINE
-
-    ctx.user_data[_DEADLINE] = dt.isoformat()
-
-    if ctx.user_data.get("_after_edit") == "summary":
-        ctx.user_data.pop("_after_edit", None)
-        await _show_summary(update, ctx, update.effective_chat.id)
-        return CONFIRM
-
-    return await _ask_responsible(update, ctx)
+    ctx.user_data[_AFTER_EDIT] = "summary"
+    return await _ask_status(update, ctx)
 
 
 # ---------------------------------------------------------------------------
-# Cancel
+# Отмена
 # ---------------------------------------------------------------------------
 
 async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    chat_id = update.effective_chat.id
-    await _delete_tracked(ctx, chat_id)
+    await _delete_tracked(ctx, update.effective_chat.id)
     _clear_state(ctx)
     await update.message.reply_text(
         "🚫 Создание задачи отменено.",
@@ -521,22 +543,27 @@ task_conversation = ConversationHandler(
     entry_points=[CommandHandler("newtask", cmd_newtask)],
     states={
         ASK_TITLE: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, recv_title_smart),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, recv_title),
             CallbackQueryHandler(cb_back_to_title, pattern=r"^back_to_title$"),
         ],
         ASK_DESC: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, recv_desc_smart),
-            CallbackQueryHandler(cb_desc_skip_smart, pattern=r"^desc_skip$"),
-            CallbackQueryHandler(cb_back_to_title,   pattern=r"^back_to_title$"),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, recv_desc),
+            CallbackQueryHandler(cb_desc_skip,     pattern=r"^desc_skip$"),
+            CallbackQueryHandler(cb_back_to_title, pattern=r"^back_to_title$"),
         ],
         ASK_DEADLINE: [
-            MessageHandler(filters.TEXT & ~filters.COMMAND, recv_deadline_smart),
-            CallbackQueryHandler(cb_back_to_deadline, pattern=r"^back$"),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, recv_deadline),
+            CallbackQueryHandler(cb_back_to_desc,  pattern=r"^back_to_desc$"),
+            CallbackQueryHandler(cb_back_to_desc,  pattern=r"^back$"),
         ],
         ASK_RESPONSIBLE: [
             CallbackQueryHandler(cb_pick_member,      pattern=r"^pick:"),
             CallbackQueryHandler(cb_back_to_deadline, pattern=r"^back_to_deadline$"),
-            CallbackQueryHandler(cb_back_to_deadline, pattern=r"^back$"),
+        ],
+        ASK_STATUS: [
+            CallbackQueryHandler(cb_pick_status,        pattern=r"^status:"),
+            CallbackQueryHandler(cb_status_skip,        pattern=r"^status_skip$"),
+            CallbackQueryHandler(cb_back_to_responsible, pattern=r"^back_to_responsible$"),
         ],
         CONFIRM: [
             CallbackQueryHandler(cb_confirm,   pattern=r"^task_confirm$"),
@@ -547,6 +574,7 @@ task_conversation = ConversationHandler(
             CallbackQueryHandler(cb_edit_desc,        pattern=r"^edit_desc$"),
             CallbackQueryHandler(cb_edit_deadline,    pattern=r"^edit_deadline$"),
             CallbackQueryHandler(cb_edit_responsible, pattern=r"^edit_responsible$"),
+            CallbackQueryHandler(cb_edit_status,      pattern=r"^edit_status$"),
         ],
     },
     fallbacks=[CommandHandler("cancel", cmd_cancel)],
