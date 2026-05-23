@@ -13,7 +13,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.jobstores.memory import MemoryJobStore
 import pytz
 
-from config import TIMEZONE
+from config import TIMEZONE, THREAD_ID
 import db
 
 logger = logging.getLogger(__name__)
@@ -70,6 +70,7 @@ def _send_reminder(task_id: int, bot_token: str) -> None:
             text=text,
             parse_mode="Markdown",
             reply_markup=keyboard,
+            message_thread_id=THREAD_ID,
         )
         db.set_reminder_msg(task_id, msg.message_id)
 
