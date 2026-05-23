@@ -49,7 +49,7 @@ def stop() -> None:
 def _send_reminder(task_id: int, bot_token: str) -> None:
     import asyncio
     import telegram
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
 
     task = db.get_task(task_id)
     if task is None or task["status"] != "pending":
@@ -60,16 +60,16 @@ def _send_reminder(task_id: int, bot_token: str) -> None:
     title   = task["title"] or task["description"] or "—"
     dl_str  = fmt_dt(task["deadline"])
 
+    desc   = task["description"] or "—"
+    status = task["task_status"] or "—"
+
     text = (
         f"⏰ *Напоминание*\n\n"
-        f"📋 *Задача:* {title} (ID: {task_id})\n"
-        f"👤 *Ответственный:* {mention}\n"
-        f"📅 *Дедлайн:* {dl_str}\n\n"
-        f"Отметить прочитанным?"
-    )
-
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("✅ Прочитано", callback_data=f"read:{task_id}")]]
+        f"Задача: {title} (ID: {task_id})\n"
+        f"Описание: {desc}\n"
+        f"Ответственный: {mention}\n"
+        f"Дедлайн: {dl_str}\n"
+        f"Статус: {status}"
     )
 
     async def _send():
@@ -77,7 +77,6 @@ def _send_reminder(task_id: int, bot_token: str) -> None:
             chat_id=task["chat_id"],
             text=text,
             parse_mode="Markdown",
-            reply_markup=keyboard,
             message_thread_id=THREAD_ID,
         )
         db.set_reminder_msg(task_id, msg.message_id)
