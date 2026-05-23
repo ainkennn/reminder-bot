@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 async def handle_read(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer("✅ Acknowledged!")
+    await query.answer("✅ Подтверждено!")
 
     task_id = int(query.data.split(":")[1])
     task = db.get_task(task_id)
