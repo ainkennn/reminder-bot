@@ -1,9 +1,5 @@
 """
 scheduler.py – APScheduler integration.
-
-One persistent BackgroundScheduler is created here.
-bot.py starts it after the Application is built so the bot instance
-can be passed in for sending messages.
 """
 
 import logging
@@ -23,6 +19,17 @@ _scheduler = BackgroundScheduler(
     timezone=pytz.timezone(TIMEZONE),
 )
 
+MONTHS_RU = {
+    1: "января", 2: "февраля", 3: "марта", 4: "апреля",
+    5: "мая", 6: "июня", 7: "июля", 8: "августа",
+    9: "сентября", 10: "октября", 11: "ноября", 12: "декабря",
+}
+
+def fmt_dt(iso_str: str) -> str:
+    tz = pytz.timezone(TIMEZONE)
+    dt = datetime.fromisoformat(iso_str).astimezone(tz)
+    return f"{dt.day} {MONTHS_RU[dt.month]} {dt.year}, {dt.strftime('%H:%M')}"
+
 
 def start() -> None:
     if not _scheduler.running:
@@ -36,11 +43,10 @@ def stop() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Job function – runs inside the scheduler thread
+# Job function
 # ---------------------------------------------------------------------------
 
 def _send_reminder(task_id: int, bot_token: str) -> None:
-    """Fetch the task and send the reminder message via the Telegram HTTP API."""
     import asyncio
     import telegram
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -49,15 +55,17 @@ def _send_reminder(task_id: int, bot_token: str) -> None:
     if task is None or task["status"] != "pending":
         return
 
-    bot = telegram.Bot(token=bot_token)
-
+    bot     = telegram.Bot(token=bot_token)
     mention = f"[{task['responsible_name']}](tg://user?id={task['responsible_id']})"
+    title   = task["title"] or task["description"] or "—"
+    dl_str  = fmt_dt(task["deadline"])
+
     text = (
-        f"⏰ *Reminder*\n\n"
-        f"📋 *Task:* {task['description']}\n"
-        f"👤 *Responsible:* {mention}\n"
-        f"📅 *Deadline:* {task['deadline']}\n\n"
-        f"Please acknowledge this reminder."
+        f"⏰ *Напоминание*\n\n"
+        f"📋 *Задача:* {title} (ID: {task_id})\n"
+        f"👤 *Ответственный:* {mention}\n"
+        f"📅 *Дедлайн:* {dl_str}\n\n"
+        f"Отметить прочитанным?"
     )
 
     keyboard = InlineKeyboardMarkup(
@@ -94,17 +102,15 @@ def schedule_reminder(task_id: int, run_at: datetime, bot_token: str) -> None:
         args=[task_id, bot_token],
         id=job_id,
         replace_existing=True,
-        misfire_grace_time=300,  # fire up to 5 min late if bot was down
+        misfire_grace_time=300,
     )
     logger.info("Scheduled reminder job %s at %s", job_id, run_at)
 
 
 def reschedule_pending(bot_token: str) -> None:
-    """Re-queue reminders for tasks that survived a bot restart."""
-    tz = pytz.timezone(TIMEZONE)
+    tz  = pytz.timezone(TIMEZONE)
     now = datetime.now(tz)
-    tasks = db.get_pending_tasks()
-    for task in tasks:
+    for task in db.get_pending_tasks():
         try:
             run_at = datetime.fromisoformat(task["deadline"])
             if run_at.tzinfo is None:
@@ -112,9 +118,6 @@ def reschedule_pending(bot_token: str) -> None:
             if run_at > now:
                 schedule_reminder(task["id"], run_at, bot_token)
             else:
-                logger.warning(
-                    "Task %s deadline %s is in the past – skipping reschedule",
-                    task["id"], task["deadline"],
-                )
+                logger.warning("Task %s deadline is in the past – skipping", task["id"])
         except Exception:
             logger.exception("Failed to reschedule task %s", task["id"])
