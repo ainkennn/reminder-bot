@@ -27,7 +27,7 @@ from telegram.ext import (
     filters,
 )
 
-from config import TIMEZONE
+from config import TIMEZONE, THREAD_ID
 import db
 import scheduler as sched
 
@@ -250,7 +250,7 @@ async def cancel_task(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     await _delete_tracked(ctx, chat_id)
     _clear_state(ctx)
 
-    await ctx.bot.send_message(chat_id=chat_id, text="🚫 Task creation cancelled.")
+    await ctx.bot.send_message(chat_id=chat_id, text="🚫 Task creation cancelled.", message_thread_id=THREAD_ID)
     return ConversationHandler.END
 
 
