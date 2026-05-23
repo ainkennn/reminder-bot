@@ -47,7 +47,8 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS tasks (
                 id               INTEGER PRIMARY KEY AUTOINCREMENT,
                 chat_id          INTEGER NOT NULL,
-                description      TEXT    NOT NULL,
+                title            TEXT    NOT NULL DEFAULT '',
+                description      TEXT    NOT NULL DEFAULT '',
                 deadline         TEXT    NOT NULL,   -- ISO‑8601 string
                 responsible_id   INTEGER NOT NULL,
                 responsible_name TEXT    NOT NULL,
@@ -105,13 +106,14 @@ def create_task(
     deadline: str,
     responsible_id: int,
     responsible_name: str,
+    title: str = "",
 ) -> int:
     with _conn() as con:
         cur = con.execute("""
             INSERT INTO tasks
-                (chat_id, description, deadline, responsible_id, responsible_name)
-            VALUES (?, ?, ?, ?, ?)
-        """, (chat_id, description, deadline, responsible_id, responsible_name))
+                (chat_id, title, description, deadline, responsible_id, responsible_name)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (chat_id, title, description, deadline, responsible_id, responsible_name))
         return cur.lastrowid  # type: ignore[return-value]
 
 
