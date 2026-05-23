@@ -7,12 +7,12 @@ Run with:
 
 import logging
 
-from telegram import BotCommand
-from telegram.ext import Application, CommandHandler
+from telegram import BotCommand, Update
+from telegram.ext import Application, CommandHandler, ContextTypes, filters
 
 import db
 import scheduler as sched
-from config import BOT_TOKEN
+from config import BOT_TOKEN, GROUP_ID, THREAD_ID
 from handlers.admin import handlers as admin_handlers
 from handlers.callbacks import handlers as callback_handlers
 from handlers.tasks import task_conversation
@@ -25,11 +25,35 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Thread filter – only respond in the configured group thread
+# ---------------------------------------------------------------------------
+
+def _in_target_thread(update: Update) -> bool:
+    """Return True if the message is in the configured group + thread."""
+    if GROUP_ID is None:
+        return True  # no restriction configured, allow all
+    msg = update.effective_message
+    if msg is None:
+        return True  # callback queries etc. – let them through
+    chat_id = update.effective_chat.id
+    # Telegram supergroup IDs in the Bot API are -100<url_number>
+    expected_chat = int(f"-100{GROUP_ID}") if GROUP_ID > 0 else GROUP_ID
+    if chat_id != expected_chat:
+        return False
+    if THREAD_ID is not None:
+        return msg.message_thread_id == THREAD_ID
+    return True
+
+
+thread_filter = filters.UpdateFilter(_in_target_thread)
+
+
+# ---------------------------------------------------------------------------
 # /start  /help
 # ---------------------------------------------------------------------------
 
-async def cmd_start(update, ctx):
-    await update.message.reply_text(
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_text(
         "👋 *Team Reminder Bot*\n\n"
         "Commands:\n"
         "• /newtask – create a new task with a reminder\n"
@@ -39,10 +63,11 @@ async def cmd_start(update, ctx):
         "• /addmember `<id> <name> [role]` – add / update a team member\n"
         "• /delmember `<id>` – remove a team member",
         parse_mode="Markdown",
+        message_thread_id=THREAD_ID,
     )
 
 
-async def cmd_help(update, ctx):
+async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await cmd_start(update, ctx)
 
 
@@ -84,18 +109,18 @@ def main() -> None:
         .build()
     )
 
-    # Core commands
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("help",  cmd_help))
+    # Core commands – only in the target thread
+    app.add_handler(CommandHandler("start", cmd_start, filters=thread_filter))
+    app.add_handler(CommandHandler("help",  cmd_help,  filters=thread_filter))
 
-    # Task creation conversation (must be before generic callback handlers)
+    # Task creation conversation
     app.add_handler(task_conversation)
 
     # Admin commands
     for h in admin_handlers:
         app.add_handler(h)
 
-    # Inline button callbacks (Read acknowledgment, etc.)
+    # Inline button callbacks (Read acknowledgment etc.)
     for h in callback_handlers:
         app.add_handler(h)
 
