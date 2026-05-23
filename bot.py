@@ -77,12 +77,12 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def post_init(app: Application) -> None:
     await app.bot.set_my_commands([
-        BotCommand("newtask",     "Create a new task"),
-        BotCommand("listmembers", "Show team roster"),
-        BotCommand("cancel",      "Cancel current task creation"),
-        BotCommand("addmember",   "Admin: add/update a team member"),
-        BotCommand("delmember",   "Admin: remove a team member"),
-        BotCommand("help",        "Show help"),
+        BotCommand("newtask",     "Создать новую задачу"),
+        BotCommand("listmembers", "Список участников команды"),
+        BotCommand("cancel",      "Отменить создание задачи"),
+        BotCommand("addmember",   "Админ: добавить участника"),
+        BotCommand("delmember",   "Админ: удалить участника"),
+        BotCommand("help",        "Помощь"),
     ])
 
     sched.start()
