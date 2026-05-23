@@ -52,6 +52,7 @@ def init_db() -> None:
                 deadline         TEXT    NOT NULL,   -- ISO‑8601 string
                 responsible_id   INTEGER NOT NULL,
                 responsible_name TEXT    NOT NULL,
+                task_status      TEXT    NOT NULL DEFAULT '',
                 status           TEXT    NOT NULL DEFAULT 'pending',
                 summary_msg_id   INTEGER,            -- pinned summary message
                 reminder_msg_id  INTEGER             -- live reminder message
@@ -107,13 +108,14 @@ def create_task(
     responsible_id: int,
     responsible_name: str,
     title: str = "",
+    task_status: str = "",
 ) -> int:
     with _conn() as con:
         cur = con.execute("""
             INSERT INTO tasks
-                (chat_id, title, description, deadline, responsible_id, responsible_name)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (chat_id, title, description, deadline, responsible_id, responsible_name))
+                (chat_id, title, description, deadline, responsible_id, responsible_name, task_status)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (chat_id, title, description, deadline, responsible_id, responsible_name, task_status))
         return cur.lastrowid  # type: ignore[return-value]
 
 
