@@ -1,6 +1,5 @@
 """
-handlers/callbacks.py – Inline button callbacks not tied to a conversation.
-
+handlers/callbacks.py – Inline button callbacks.
 Handles: read:<task_id>
 """
 
@@ -12,6 +11,7 @@ from telegram import Update
 from telegram.ext import ContextTypes, CallbackQueryHandler
 
 from config import TIMEZONE, THREAD_ID
+from scheduler import fmt_dt
 import db
 
 logger = logging.getLogger(__name__)
@@ -22,41 +22,37 @@ async def handle_read(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await query.answer("✅ Подтверждено!")
 
     task_id = int(query.data.split(":")[1])
-    task = db.get_task(task_id)
+    task    = db.get_task(task_id)
 
     if task is None:
-        await query.message.reply_text("⚠️ Task not found.")
+        await query.message.reply_text("⚠️ Задача не найдена.")
         return
 
     if task["status"] == "read":
-        # Already acknowledged – just clean up the button silently
         try:
             await query.message.delete()
         except Exception:
             pass
         return
 
-    # Mark as read in DB
     db.mark_task_read(task_id)
 
-    # Delete the reminder message
     try:
         await query.message.delete()
     except Exception:
         logger.warning("Could not delete reminder message for task %s", task_id)
 
-    # Post final status message
-    tz       = pytz.timezone(TIMEZONE)
-    dt       = datetime.fromisoformat(task["deadline"]).astimezone(tz)
-    dl_str   = dt.strftime("%Y-%m-%d %H:%M %Z")
     mention  = f"[{task['responsible_name']}](tg://user?id={task['responsible_id']})"
+    title    = task["title"] or task["description"] or "—"
+    dl_str   = fmt_dt(task["deadline"])
 
     status_text = (
-        f"📋 *Task Acknowledged*\n\n"
-        f"*Task:* {task['description']}\n"
-        f"*Responsible:* {mention}\n"
-        f"*Deadline:* {dl_str}\n"
-        f"*Status:* ✅ Read"
+        f"📋 *Задача подтверждена*\n\n"
+        f"*Название:* {title}\n"
+        f"*Описание:* {task['description'] or '—'}\n"
+        f"*Ответственный:* {mention}\n"
+        f"*Дедлайн:* {dl_str}\n"
+        f"*Статус:* ✅ Прочитано"
     )
 
     await ctx.bot.send_message(
@@ -67,10 +63,6 @@ async def handle_read(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
     logger.info("Task %s marked as read", task_id)
 
-
-# ---------------------------------------------------------------------------
-# Handler list (imported by bot.py)
-# ---------------------------------------------------------------------------
 
 handlers = [
     CallbackQueryHandler(handle_read, pattern=r"^read:\d+$"),
